@@ -228,135 +228,98 @@ function maskKey(prefix) {
   return `${prefix}****************`;
 }
 
-function normalizeContent(content) {
-  if (typeof content === "string") {
-    return content;
+function extractText(value, seen = new WeakSet()) {
+  if (typeof value === "string") {
+    return value.trim();
   }
-  if (Array.isArray(content)) {
-    return content
-      .map((part) => {
-        if (typeof part === "string") {
-          return part;
-        }
-        if (part && typeof part.text === "string") {
-          return part.text;
-        }
-        if (part && typeof part.content === "string") {
-          return part.content;
-        }
-        return "";
-      })
-      .join(" ")
-      .trim();
-  }
-  if (content && typeof content.text === "string") {
-    return content.text;
-  }
-  if (content && typeof content.content === "string") {
-    return content.content;
-  }
-  return "";
-}
 
-function normalizeMessageValue(message) {
-  if (typeof message === "string") {
-    return message;
+  if (Array.isArray(value)) {
+    const parts = value
+      .map((item) => extractText(item, seen))
+      .filter((part) => typeof part === "string" && part.trim());
+    return parts.join(" ").trim();
   }
-  if (message && typeof message.content === "string") {
-    return message.content;
+
+  if (!value || typeof value !== "object") {
+    return "";
   }
-  if (message && message.content) {
-    const nested = normalizeContent(message.content);
+
+  if (seen.has(value)) {
+    return "";
+  }
+  seen.add(value);
+
+  const directKeys = ["text", "content", "value", "output_text"];
+  for (const key of directKeys) {
+    const field = value[key];
+    if (typeof field === "string" && field.trim()) {
+      return field.trim();
+    }
+  }
+
+  const nestedKeys = [
+    "text",
+    "content",
+    "value",
+    "output_text",
+    "delta",
+    "message",
+    "choice",
+    "choices",
+    "parts",
+    "output",
+    "messages",
+    "response",
+    "result"
+  ];
+  for (const key of nestedKeys) {
+    if (value[key] === undefined) {
+      continue;
+    }
+    const nested = extractText(value[key], seen);
     if (nested) {
       return nested;
     }
   }
+
+  for (const nestedValue of Object.values(value)) {
+    if (!nestedValue || typeof nestedValue !== "object") {
+      continue;
+    }
+    const nested = extractText(nestedValue, seen);
+    if (nested) {
+      return nested;
+    }
+  }
+
   return "";
+}
+
+function normalizeContent(content) {
+  return extractText(content);
+}
+
+function normalizeMessageValue(message) {
+  if (message && typeof message === "object" && message.content !== undefined) {
+    return normalizeContent(message.content);
+  }
+  return normalizeContent(message);
 }
 
 function normalizeModelOutput(result) {
-  if (typeof result === "string") {
-    return result;
+  const extracted = normalizeContent(result);
+  if (extracted) {
+    return extracted;
   }
-  if (result && typeof result.text === "string") {
-    return result.text;
+  try {
+    return JSON.stringify(result);
+  } catch {
+    return String(result || "");
   }
-  if (result && typeof result.message === "string") {
-    return result.message;
-  }
-  if (result?.message) {
-    const messageContent = normalizeMessageValue(result.message);
-    if (messageContent) {
-      return messageContent;
-    }
-  }
-  if (Array.isArray(result?.choices)) {
-    for (const choice of result.choices) {
-      if (typeof choice?.text === "string" && choice.text) {
-        return choice.text;
-      }
-      if (choice?.message) {
-        const messageContent = normalizeMessageValue(choice.message);
-        if (messageContent) {
-          return messageContent;
-        }
-      }
-      if (choice?.delta) {
-        const deltaContent = normalizeContent(choice.delta.content);
-        if (deltaContent) {
-          return deltaContent;
-        }
-      }
-    }
-  }
-  return JSON.stringify(result);
 }
 
 function normalizeStreamChunkText(chunk) {
-  if (typeof chunk === "string") {
-    return chunk;
-  }
-  if (chunk && typeof chunk.text === "string") {
-    return chunk.text;
-  }
-  if (chunk?.delta && typeof chunk.delta.content === "string") {
-    return chunk.delta.content;
-  }
-  if (chunk?.delta?.content) {
-    const deltaContent = normalizeContent(chunk.delta.content);
-    if (deltaContent) {
-      return deltaContent;
-    }
-  }
-  if (chunk?.message) {
-    const messageContent = normalizeMessageValue(chunk.message);
-    if (messageContent) {
-      return messageContent;
-    }
-  }
-  if (Array.isArray(chunk?.choices)) {
-    for (const choice of chunk.choices) {
-      if (choice?.delta) {
-        if (typeof choice.delta.content === "string") {
-          return choice.delta.content;
-        }
-        const content = normalizeContent(choice.delta.content);
-        if (content) {
-          return content;
-        }
-      }
-      if (typeof choice?.text === "string" && choice.text) {
-        return choice.text;
-      }
-      if (choice?.message) {
-        const messageContent = normalizeMessageValue(choice.message);
-        if (messageContent) {
-          return messageContent;
-        }
-      }
-    }
-  }
-  return "";
+  return normalizeContent(chunk);
 }
 
 function getChatInput(body) {
@@ -819,7 +782,7 @@ app.get("/v1/models/:model", handleModelsRequest);
 app.get("/models", handleModelsRequest);
 app.get("/models/:model", handleModelsRequest);
 
-app.post("/v1/chat/completions", async (req, res) => {
+async function handleChatCompletions(req, res) {
   const owner = requireApiKeyOwner(req, res);
   if (!owner) {
     return;
@@ -868,38 +831,83 @@ app.post("/v1/chat/completions", async (req, res) => {
         ]
       });
 
+      const isAsyncIterable =
+        streamResult && typeof streamResult[Symbol.asyncIterator] === "function";
+
       let emittedText = "";
-      for await (const chunk of streamResult) {
-        const chunkText = normalizeStreamChunkText(chunk);
-        if (!chunkText) {
-          continue;
-        }
+      let emittedAnyContent = false;
 
-        let deltaText = chunkText;
-        if (chunkText.startsWith(emittedText)) {
-          deltaText = chunkText.slice(emittedText.length);
-          emittedText = chunkText;
-        } else {
-          emittedText += chunkText;
-        }
+      if (isAsyncIterable) {
+        for await (const chunk of streamResult) {
+          const chunkText = normalizeStreamChunkText(chunk);
+          if (!chunkText) {
+            continue;
+          }
 
-        if (!deltaText) {
-          continue;
-        }
+          let deltaText = chunkText;
+          if (chunkText.startsWith(emittedText)) {
+            deltaText = chunkText.slice(emittedText.length);
+            emittedText = chunkText;
+          } else {
+            emittedText += chunkText;
+          }
 
-        writeSseChunk(res, {
-          id: completionId,
-          object: "chat.completion.chunk",
-          created,
-          model,
-          choices: [
-            {
-              index: 0,
-              delta: { content: deltaText },
-              finish_reason: null
-            }
-          ]
-        });
+          if (!deltaText) {
+            continue;
+          }
+
+          emittedAnyContent = true;
+          writeSseChunk(res, {
+            id: completionId,
+            object: "chat.completion.chunk",
+            created,
+            model,
+            choices: [
+              {
+                index: 0,
+                delta: { content: deltaText },
+                finish_reason: null
+              }
+            ]
+          });
+        }
+      } else {
+        const content = normalizeModelOutput(streamResult);
+        if (content) {
+          emittedAnyContent = true;
+          writeSseChunk(res, {
+            id: completionId,
+            object: "chat.completion.chunk",
+            created,
+            model,
+            choices: [
+              {
+                index: 0,
+                delta: { content },
+                finish_reason: null
+              }
+            ]
+          });
+        }
+      }
+
+      if (!emittedAnyContent) {
+        const fallbackContent = normalizeModelOutput(streamResult);
+        if (fallbackContent) {
+          writeSseChunk(res, {
+            id: completionId,
+            object: "chat.completion.chunk",
+            created,
+            model,
+            choices: [
+              {
+                index: 0,
+                delta: { content: fallbackContent },
+                finish_reason: null
+              }
+            ]
+          });
+        }
       }
 
       writeSseChunk(res, {
@@ -967,7 +975,10 @@ app.post("/v1/chat/completions", async (req, res) => {
       }
     });
   }
-});
+}
+
+app.post("/v1/chat/completions", handleChatCompletions);
+app.post("/chat/completions", handleChatCompletions);
 
 app.listen(port, () => {
   console.log(`Gateway running on http://localhost:${port}`);
