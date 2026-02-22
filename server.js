@@ -11,6 +11,8 @@ dotenv.config();
 const port = Number(process.env.PORT || 3000);
 const puterApiOrigin = process.env.PUTER_API_ORIGIN || "https://api.puter.com";
 const sessionTtlMs = Number(process.env.SESSION_TTL_HOURS || 24) * 60 * 60 * 1000;
+const defaultChatModel =
+  (process.env.DEFAULT_CHAT_MODEL || "").trim() || "gpt-5-nano";
 const bootstrapPuterToken = (process.env.PUTER_AUTH_TOKEN || "").trim();
 const bootstrapApiKeys = new Set(
   (process.env.APP_API_KEYS || "")
@@ -79,6 +81,13 @@ function getBearerToken(req) {
     return "";
   }
   return auth.slice("Bearer ".length).trim();
+}
+
+function getApiKeyFromRequest(req) {
+  const bearer = getBearerToken(req);
+  const xApiKey = (req.headers["x-api-key"] || "").toString().trim();
+  const apiKeyHeader = (req.headers["api-key"] || "").toString().trim();
+  return bearer || xApiKey || apiKeyHeader;
 }
 
 function createSessionToken() {
@@ -176,6 +185,45 @@ function findOwnerByApiKey(rawApiKey) {
   };
 }
 
+function requireApiKeyOwner(req, res) {
+  const apiKey = getApiKeyFromRequest(req);
+  if (!apiKey) {
+    res.status(401).json({
+      error: {
+        message: "Missing API key",
+        type: "invalid_api_key"
+      }
+    });
+    return null;
+  }
+
+  const owner = findOwnerByApiKey(apiKey);
+  if (!owner) {
+    res.status(401).json({
+      error: {
+        message: "Invalid API key",
+        type: "invalid_api_key"
+      }
+    });
+    return null;
+  }
+
+  return owner;
+}
+
+function markKeyAsUsed(owner) {
+  if (owner?.source !== "user" || !owner?.keyRecord?.id) {
+    return;
+  }
+
+  const store = loadStore();
+  const existing = store.keys.find((entry) => entry.id === owner.keyRecord.id);
+  if (existing && !existing.revokedAt) {
+    existing.lastUsedAt = new Date().toISOString();
+    saveStore(store);
+  }
+}
+
 function maskKey(prefix) {
   return `${prefix}****************`;
 }
@@ -193,26 +241,37 @@ function normalizeContent(content) {
         if (part && typeof part.text === "string") {
           return part.text;
         }
+        if (part && typeof part.content === "string") {
+          return part.content;
+        }
         return "";
       })
       .join(" ")
       .trim();
   }
+  if (content && typeof content.text === "string") {
+    return content.text;
+  }
+  if (content && typeof content.content === "string") {
+    return content.content;
+  }
   return "";
 }
 
-function messagesToPrompt(messages) {
-  if (!Array.isArray(messages) || messages.length === 0) {
-    return "";
+function normalizeMessageValue(message) {
+  if (typeof message === "string") {
+    return message;
   }
-
-  return messages
-    .map((message) => {
-      const role = (message?.role || "user").toString().toUpperCase();
-      const content = normalizeContent(message?.content);
-      return `[${role}] ${content}`;
-    })
-    .join("\n");
+  if (message && typeof message.content === "string") {
+    return message.content;
+  }
+  if (message && message.content) {
+    const nested = normalizeContent(message.content);
+    if (nested) {
+      return nested;
+    }
+  }
+  return "";
 }
 
 function normalizeModelOutput(result) {
@@ -225,7 +284,282 @@ function normalizeModelOutput(result) {
   if (result && typeof result.message === "string") {
     return result.message;
   }
+  if (result?.message) {
+    const messageContent = normalizeMessageValue(result.message);
+    if (messageContent) {
+      return messageContent;
+    }
+  }
+  if (Array.isArray(result?.choices)) {
+    for (const choice of result.choices) {
+      if (typeof choice?.text === "string" && choice.text) {
+        return choice.text;
+      }
+      if (choice?.message) {
+        const messageContent = normalizeMessageValue(choice.message);
+        if (messageContent) {
+          return messageContent;
+        }
+      }
+      if (choice?.delta) {
+        const deltaContent = normalizeContent(choice.delta.content);
+        if (deltaContent) {
+          return deltaContent;
+        }
+      }
+    }
+  }
   return JSON.stringify(result);
+}
+
+function normalizeStreamChunkText(chunk) {
+  if (typeof chunk === "string") {
+    return chunk;
+  }
+  if (chunk && typeof chunk.text === "string") {
+    return chunk.text;
+  }
+  if (chunk?.delta && typeof chunk.delta.content === "string") {
+    return chunk.delta.content;
+  }
+  if (chunk?.delta?.content) {
+    const deltaContent = normalizeContent(chunk.delta.content);
+    if (deltaContent) {
+      return deltaContent;
+    }
+  }
+  if (chunk?.message) {
+    const messageContent = normalizeMessageValue(chunk.message);
+    if (messageContent) {
+      return messageContent;
+    }
+  }
+  if (Array.isArray(chunk?.choices)) {
+    for (const choice of chunk.choices) {
+      if (choice?.delta) {
+        if (typeof choice.delta.content === "string") {
+          return choice.delta.content;
+        }
+        const content = normalizeContent(choice.delta.content);
+        if (content) {
+          return content;
+        }
+      }
+      if (typeof choice?.text === "string" && choice.text) {
+        return choice.text;
+      }
+      if (choice?.message) {
+        const messageContent = normalizeMessageValue(choice.message);
+        if (messageContent) {
+          return messageContent;
+        }
+      }
+    }
+  }
+  return "";
+}
+
+function getChatInput(body) {
+  const messages = Array.isArray(body?.messages) ? body.messages : [];
+  if (messages.length > 0) {
+    return messages;
+  }
+
+  const prompt = typeof body?.prompt === "string" ? body.prompt : "";
+  if (prompt.trim()) {
+    return prompt;
+  }
+
+  return null;
+}
+
+function buildChatOptions(body, { stream = false } = {}) {
+  const options = {
+    model: (body?.model || defaultChatModel).toString().trim() || defaultChatModel
+  };
+
+  if (typeof body?.temperature === "number") {
+    options.temperature = body.temperature;
+  }
+  if (typeof body?.max_tokens === "number") {
+    options.max_tokens = body.max_tokens;
+  }
+
+  const passthroughFields = [
+    "tools",
+    "response",
+    "reasoning",
+    "reasoning_effort",
+    "text",
+    "verbosity",
+    "provider"
+  ];
+  for (const key of passthroughFields) {
+    if (body?.[key] !== undefined) {
+      options[key] = body[key];
+    }
+  }
+
+  if (stream) {
+    options.stream = true;
+  }
+
+  return options;
+}
+
+function writeSseChunk(res, payload) {
+  res.write(`data: ${JSON.stringify(payload)}\n\n`);
+}
+
+function mapModelRecord(model) {
+  const id =
+    model?.id || model?.model || model?.name || model?.slug || model?.model_name;
+  if (typeof id !== "string" || !id.trim()) {
+    return null;
+  }
+
+  const created =
+    Number(
+      model?.created ||
+        model?.created_at ||
+        model?.createdAt ||
+        model?.timestamp ||
+        0
+    ) || 0;
+
+  return {
+    id: id.trim(),
+    object: "model",
+    created,
+    owned_by: (model?.provider || model?.owned_by || "puter").toString()
+  };
+}
+
+async function getOpenAIModelList(puter) {
+  const models = await puter.ai.listModels();
+  const mapped = Array.isArray(models)
+    ? models.map((model) => mapModelRecord(model)).filter(Boolean)
+    : [];
+
+  if (!mapped.length) {
+    return [
+      {
+        id: defaultChatModel,
+        object: "model",
+        created: 0,
+        owned_by: "puter"
+      }
+    ];
+  }
+
+  const seen = new Set();
+  return mapped.filter((model) => {
+    if (seen.has(model.id)) {
+      return false;
+    }
+    seen.add(model.id);
+    return true;
+  });
+}
+
+function mapProviderError(error) {
+  const status =
+    Number(
+      error?.status ||
+        error?.statusCode ||
+        error?.response?.status ||
+        error?.response?.statusCode ||
+        error?.error?.status ||
+        0
+    ) || 0;
+
+  const rawMessage =
+    (error?.message || error?.error?.message || "Model request failed").toString();
+
+  const codeHints = [
+    error?.code,
+    error?.name,
+    error?.error?.code,
+    error?.response?.data?.code,
+    error?.response?.error?.code
+  ]
+    .filter(Boolean)
+    .map((value) => value.toString().toLowerCase());
+
+  const responsePayload =
+    error?.response?.data ?? error?.response ?? error?.error ?? null;
+
+  let payloadText = "";
+  try {
+    payloadText = responsePayload ? JSON.stringify(responsePayload) : "";
+  } catch {
+    payloadText = String(responsePayload || "");
+  }
+
+  const combined = `${rawMessage} ${payloadText} ${codeHints.join(" ")}`.toLowerCase();
+
+  const isRateLimited =
+    status === 429 ||
+    combined.includes("rate limit") ||
+    combined.includes("too many requests") ||
+    combined.includes("quota") ||
+    combined.includes("allowance") ||
+    combined.includes("throttle") ||
+    combined.includes("429") ||
+    codeHints.some(
+      (code) =>
+        code.includes("rate") ||
+        code.includes("quota") ||
+        code.includes("allowance") ||
+        code.includes("too_many_requests")
+    );
+
+  if (isRateLimited) {
+    return {
+      status: 429,
+      type: "rate_limited",
+      message:
+        "You are rate limited by Puter right now. Please wait and retry.",
+      providerStatus: status || 429
+    };
+  }
+
+  if (
+    status === 401 ||
+    combined.includes("unauthorized") ||
+    combined.includes("token") ||
+    combined.includes("auth")
+  ) {
+    return {
+      status: 401,
+      type: "provider_auth_error",
+      message:
+        "Provider authentication failed. Sign in with Puter again and refresh your key.",
+      providerStatus: status || 401
+    };
+  }
+
+  if (
+    status === 400 ||
+    (combined.includes("model") &&
+      (combined.includes("not found") ||
+        combined.includes("unknown") ||
+        combined.includes("invalid")))
+  ) {
+    return {
+      status: 400,
+      type: "invalid_model",
+      message: "The selected model is invalid or unavailable.",
+      providerStatus: status || 400
+    };
+  }
+
+  return {
+    status: 502,
+    type: "provider_error",
+    message: rawMessage,
+    providerStatus: status || null
+  };
 }
 
 ensureStore();
@@ -439,37 +773,61 @@ app.delete("/v1/keys/:id", requireSession, (req, res) => {
   return res.json({ ok: true });
 });
 
-app.post("/v1/chat/completions", async (req, res) => {
-  const bearer = getBearerToken(req);
-  const fallback = (req.headers["x-api-key"] || "").toString().trim();
-  const apiKey = bearer || fallback;
-
-  if (!apiKey) {
-    return res.status(401).json({
-      error: {
-        message: "Missing API key",
-        type: "invalid_api_key"
-      }
-    });
-  }
-
-  const owner = findOwnerByApiKey(apiKey);
+async function handleModelsRequest(req, res) {
+  const owner = requireApiKeyOwner(req, res);
   if (!owner) {
-    return res.status(401).json({
+    return;
+  }
+
+  try {
+    const puter = getPuterClient(owner.puterToken);
+    const data = await getOpenAIModelList(puter);
+    const requestedModelId =
+      typeof req.params?.model === "string" ? req.params.model.trim() : "";
+
+    if (requestedModelId) {
+      const match = data.find((model) => model.id === requestedModelId);
+      if (!match) {
+        return res.status(404).json({
+          error: {
+            message: "Model not found",
+            type: "invalid_model"
+          }
+        });
+      }
+      return res.json(match);
+    }
+
+    return res.json({
+      object: "list",
+      data
+    });
+  } catch (error) {
+    const mapped = mapProviderError(error);
+    return res.status(mapped.status).json({
       error: {
-        message: "Invalid API key",
-        type: "invalid_api_key"
+        message: mapped.message,
+        type: mapped.type,
+        provider_status: mapped.providerStatus
       }
     });
   }
+}
 
-  const model = req.body?.model || "gpt-5-nano";
-  const prompt =
-    typeof req.body?.prompt === "string"
-      ? req.body.prompt
-      : messagesToPrompt(req.body?.messages);
+app.get("/v1/models", handleModelsRequest);
+app.get("/v1/models/:model", handleModelsRequest);
+app.get("/models", handleModelsRequest);
+app.get("/models/:model", handleModelsRequest);
 
-  if (!prompt || !prompt.trim()) {
+app.post("/v1/chat/completions", async (req, res) => {
+  const owner = requireApiKeyOwner(req, res);
+  if (!owner) {
+    return;
+  }
+
+  const stream = req.body?.stream === true;
+  const input = getChatInput(req.body);
+  if (!input) {
     return res.status(400).json({
       error: {
         message: "Provide either `prompt` or `messages`",
@@ -480,22 +838,99 @@ app.post("/v1/chat/completions", async (req, res) => {
 
   try {
     const puter = getPuterClient(owner.puterToken);
-    const raw = await puter.ai.chat(prompt, { model });
-    const content = normalizeModelOutput(raw);
+    const completionId = `chatcmpl-${crypto.randomUUID()}`;
+    const created = Math.floor(Date.now() / 1000);
+    const options = buildChatOptions(req.body, { stream });
+    const model = options.model;
 
-    if (owner.source === "user" && owner.keyRecord?.id) {
-      const store = loadStore();
-      const existing = store.keys.find((entry) => entry.id === owner.keyRecord.id);
-      if (existing && !existing.revokedAt) {
-        existing.lastUsedAt = new Date().toISOString();
-        saveStore(store);
+    if (stream) {
+      const streamResult = await puter.ai.chat(input, options);
+
+      res.status(200);
+      res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+      res.setHeader("Cache-Control", "no-cache, no-transform");
+      res.setHeader("Connection", "keep-alive");
+      if (typeof res.flushHeaders === "function") {
+        res.flushHeaders();
       }
+
+      writeSseChunk(res, {
+        id: completionId,
+        object: "chat.completion.chunk",
+        created,
+        model,
+        choices: [
+          {
+            index: 0,
+            delta: { role: "assistant" },
+            finish_reason: null
+          }
+        ]
+      });
+
+      let emittedText = "";
+      for await (const chunk of streamResult) {
+        const chunkText = normalizeStreamChunkText(chunk);
+        if (!chunkText) {
+          continue;
+        }
+
+        let deltaText = chunkText;
+        if (chunkText.startsWith(emittedText)) {
+          deltaText = chunkText.slice(emittedText.length);
+          emittedText = chunkText;
+        } else {
+          emittedText += chunkText;
+        }
+
+        if (!deltaText) {
+          continue;
+        }
+
+        writeSseChunk(res, {
+          id: completionId,
+          object: "chat.completion.chunk",
+          created,
+          model,
+          choices: [
+            {
+              index: 0,
+              delta: { content: deltaText },
+              finish_reason: null
+            }
+          ]
+        });
+      }
+
+      writeSseChunk(res, {
+        id: completionId,
+        object: "chat.completion.chunk",
+        created,
+        model,
+        choices: [
+          {
+            index: 0,
+            delta: {},
+            finish_reason: "stop"
+          }
+        ]
+      });
+      res.write("data: [DONE]\n\n");
+
+      markKeyAsUsed(owner);
+      res.end();
+      return;
     }
 
+    const raw = await puter.ai.chat(input, options);
+    const content = normalizeModelOutput(raw);
+
+    markKeyAsUsed(owner);
+
     return res.json({
-      id: `chatcmpl-${crypto.randomUUID()}`,
+      id: completionId,
       object: "chat.completion",
-      created: Math.floor(Date.now() / 1000),
+      created,
       model,
       choices: [
         {
@@ -506,14 +941,29 @@ app.post("/v1/chat/completions", async (req, res) => {
           },
           finish_reason: "stop"
         }
-      ],
-      raw
+      ]
     });
   } catch (error) {
-    return res.status(500).json({
+    const mapped = mapProviderError(error);
+
+    if (stream && res.headersSent) {
+      writeSseChunk(res, {
+        error: {
+          message: mapped.message,
+          type: mapped.type,
+          provider_status: mapped.providerStatus
+        }
+      });
+      res.write("data: [DONE]\n\n");
+      res.end();
+      return;
+    }
+
+    return res.status(mapped.status).json({
       error: {
-        message: error?.message || "Model request failed",
-        type: "provider_error"
+        message: mapped.message,
+        type: mapped.type,
+        provider_status: mapped.providerStatus
       }
     });
   }
@@ -522,3 +972,4 @@ app.post("/v1/chat/completions", async (req, res) => {
 app.listen(port, () => {
   console.log(`Gateway running on http://localhost:${port}`);
 });
+

@@ -48,6 +48,7 @@ The dashboard is split into tabs: `Auth`, `Keys`, `Playground`, and `Templates`.
 1. Click **Sign In With Puter**.
 2. Create key(s) with random format like `sk-6fA2...`.
 3. Copy a key and call:
+   - `GET /v1/models`
    - `POST /v1/chat/completions`
    - `Authorization: Bearer <your-sk-key>`
 4. Use **Terminal Template** section to copy ready-to-run Bash/PowerShell/CMD code.
@@ -61,6 +62,8 @@ The dashboard is split into tabs: `Auth`, `Keys`, `Playground`, and `Templates`.
 - `POST /v1/keys` - create a key
 - `GET /v1/keys/:id/reveal` - reveal one key secret for copy
 - `DELETE /v1/keys/:id` - revoke a key
+- `GET /v1/models` - OpenAI-compatible model list for your API key
+- `GET /v1/models/:model` - fetch one model by id
 - `POST /v1/chat/completions` - call Puter model using API key
 
 ## Example Request
@@ -71,6 +74,18 @@ curl -X POST http://localhost:3000/v1/chat/completions \
   -H "Authorization: Bearer sk_your_key_here" \
   -d "{\"model\":\"gpt-5-nano\",\"messages\":[{\"role\":\"user\",\"content\":\"Hello\"}]}"
 ```
+
+## Roo Code Setup (OpenAI Compatible)
+
+In Roo Code, configure this server as an OpenAI-compatible provider:
+
+1. Base URL: `http://localhost:3000/v1`
+2. API Key: your generated `sk-...` key
+3. Model: `gpt-5-nano` (or any id from `GET /v1/models`)
+
+Compatibility notes:
+- `POST /v1/chat/completions` now returns standard OpenAI-style JSON only (`choices[0].message.content`), with no custom `raw` field.
+- `stream: true` is supported with SSE chunks and `[DONE]`, which Roo Code expects.
 
 ## Notes
 
