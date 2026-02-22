@@ -65,6 +65,7 @@ The dashboard is split into tabs: `Auth`, `Keys`, `Playground`, and `Templates`.
 - `GET /v1/models` - OpenAI-compatible model list for your API key
 - `GET /v1/models/:model` - fetch one model by id
 - `POST /v1/chat/completions` - call Puter model using API key
+- `POST /v1/images/generations` - OpenAI-compatible image generation (also available at `/images/generations`)
 
 ## Example Request
 
@@ -73,6 +74,15 @@ curl -X POST http://localhost:3000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer sk_your_key_here" \
   -d "{\"model\":\"gpt-5-nano\",\"messages\":[{\"role\":\"user\",\"content\":\"Hello\"}]}"
+```
+
+## Example Image Request
+
+```bash
+curl -X POST http://localhost:3000/v1/images/generations \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer sk_your_key_here" \
+  -d "{\"prompt\":\"A cinematic mountain landscape at sunrise\",\"size\":\"1024x1024\",\"response_format\":\"url\"}"
 ```
 
 ## Roo Code Setup (OpenAI Compatible)

@@ -1,5 +1,6 @@
 import crypto from "crypto";
 import fs from "fs";
+import { STATUS_CODES } from "http";
 import path from "path";
 import cors from "cors";
 import dotenv from "dotenv";
@@ -23,6 +24,14 @@ const bootstrapApiKeys = new Set(
 const storePath = path.join(process.cwd(), "data", "api-store.json");
 const sessions = new Map();
 const puterClientsByToken = new Map();
+const parsedAnalyticsMaxEvents = Number(process.env.ANALYTICS_MAX_EVENTS || 500);
+const analyticsMaxEvents =
+  Number.isInteger(parsedAnalyticsMaxEvents) && parsedAnalyticsMaxEvents > 0
+    ? parsedAnalyticsMaxEvents
+    : 500;
+const analyticsEvents = [];
+const analyticsStreamClients = new Set();
+let analyticsSequence = 0;
 const app = express();
 
 function ensureStore() {
@@ -336,6 +345,143 @@ function getChatInput(body) {
   return null;
 }
 
+function parseImageCount(value) {
+  if (value === undefined || value === null || value === "") {
+    return 1;
+  }
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > 10) {
+    return null;
+  }
+  return parsed;
+}
+
+function parseImageSize(value) {
+  if (value === undefined || value === null || value === "") {
+    return { width: null, height: null };
+  }
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "auto") {
+    return { width: null, height: null };
+  }
+
+  const match = normalized.match(/^(\d+)\s*x\s*(\d+)$/i);
+  if (!match) {
+    return null;
+  }
+
+  const width = Number(match[1]);
+  const height = Number(match[2]);
+  if (!Number.isInteger(width) || !Number.isInteger(height)) {
+    return null;
+  }
+  if (width < 64 || height < 64 || width > 4096 || height > 4096) {
+    return null;
+  }
+
+  return { width, height };
+}
+
+function normalizeImageSource(imageResult) {
+  if (typeof imageResult === "string" && imageResult.trim()) {
+    return imageResult.trim();
+  }
+
+  if (Array.isArray(imageResult)) {
+    for (const item of imageResult) {
+      const source = normalizeImageSource(item);
+      if (source) {
+        return source;
+      }
+    }
+    return "";
+  }
+
+  if (!imageResult || typeof imageResult !== "object") {
+    return "";
+  }
+
+  const candidateKeys = ["src", "url", "href", "image_url", "image", "result"];
+  for (const key of candidateKeys) {
+    const value = imageResult[key];
+    if (typeof value === "string" && value.trim()) {
+      return value.trim();
+    }
+  }
+
+  if (Array.isArray(imageResult.data)) {
+    for (const item of imageResult.data) {
+      const source = normalizeImageSource(item);
+      if (source) {
+        return source;
+      }
+    }
+  }
+
+  if (typeof imageResult.toString === "function") {
+    const asString = imageResult.toString();
+    if (typeof asString === "string" && asString.trim() && asString !== "[object Object]") {
+      return asString.trim();
+    }
+  }
+
+  return "";
+}
+
+function dataUriToBase64(dataUri) {
+  if (typeof dataUri !== "string" || !dataUri.startsWith("data:")) {
+    return "";
+  }
+  const commaIndex = dataUri.indexOf(",");
+  if (commaIndex < 0) {
+    return "";
+  }
+  return dataUri.slice(commaIndex + 1).trim();
+}
+
+async function imageSourceToBase64(source) {
+  const inline = dataUriToBase64(source);
+  if (inline) {
+    return inline;
+  }
+
+  const response = await fetch(source);
+  if (!response.ok) {
+    throw new Error("Unable to fetch generated image");
+  }
+
+  const arrayBuffer = await response.arrayBuffer();
+  return Buffer.from(arrayBuffer).toString("base64");
+}
+
+function buildImageOptions(body) {
+  const options = {
+    prompt: body.prompt.toString().trim()
+  };
+
+  const model = typeof body?.model === "string" ? body.model.trim() : "";
+  if (model) {
+    options.model = model;
+  }
+
+  const quality = typeof body?.quality === "string" ? body.quality.trim() : "";
+  if (quality) {
+    options.quality = quality;
+  }
+
+  const size = parseImageSize(body?.size);
+  if (size && size.width && size.height) {
+    options.width = size.width;
+    options.height = size.height;
+  }
+
+  return options;
+}
+
 function buildChatOptions(body, { stream = false } = {}) {
   const options = {
     model: (body?.model || defaultChatModel).toString().trim() || defaultChatModel
@@ -525,10 +671,165 @@ function mapProviderError(error) {
   };
 }
 
+function shouldTrackAnalyticsPath(pathname) {
+  if (!pathname || pathname.startsWith("/v1/analytics")) {
+    return false;
+  }
+
+  return (
+    pathname === "/health" ||
+    pathname.startsWith("/auth/") ||
+    pathname.startsWith("/v1/") ||
+    pathname.startsWith("/models") ||
+    pathname.startsWith("/chat/") ||
+    pathname.startsWith("/images/")
+  );
+}
+
+function getAnalyticsReason(statusCode, body) {
+  if (body && typeof body === "object") {
+    const errorMessage = body?.error?.message;
+    if (typeof errorMessage === "string" && errorMessage.trim()) {
+      return errorMessage.trim();
+    }
+
+    const message = body?.message;
+    if (typeof message === "string" && message.trim()) {
+      return message.trim();
+    }
+  }
+
+  if (statusCode >= 400) {
+    return STATUS_CODES[statusCode] || "Request failed";
+  }
+
+  return STATUS_CODES[statusCode] || "OK";
+}
+
+function summarizeAnalytics(events) {
+  const byStatus = {};
+  let ok200Count = 0;
+  let successCount = 0;
+  let errorCount = 0;
+
+  for (const entry of events) {
+    const status = Number(entry.status) || 0;
+    if (!status) {
+      continue;
+    }
+
+    byStatus[status] = (byStatus[status] || 0) + 1;
+
+    if (status === 200) {
+      ok200Count += 1;
+    }
+
+    if (status >= 200 && status < 400) {
+      successCount += 1;
+    } else if (status >= 400) {
+      errorCount += 1;
+    }
+  }
+
+  return {
+    total: events.length,
+    ok200Count,
+    successCount,
+    errorCount,
+    byStatus
+  };
+}
+
+function writeAnalyticsSse(res, eventName, payload) {
+  res.write(`event: ${eventName}\n`);
+  res.write(`data: ${JSON.stringify(payload)}\n\n`);
+}
+
+function publishAnalyticsEntry(entry) {
+  const summary = summarizeAnalytics(analyticsEvents);
+
+  for (const client of analyticsStreamClients) {
+    if (client.writableEnded) {
+      analyticsStreamClients.delete(client);
+      continue;
+    }
+
+    try {
+      writeAnalyticsSse(client, "entry", { entry, summary });
+    } catch {
+      analyticsStreamClients.delete(client);
+    }
+  }
+}
+
+function recordAnalyticsEntry({ method, pathName, statusCode, reason, durationMs }) {
+  analyticsSequence += 1;
+  const entry = {
+    id: `evt_${analyticsSequence}`,
+    at: new Date().toISOString(),
+    method,
+    path: pathName,
+    status: statusCode,
+    reason,
+    durationMs
+  };
+
+  analyticsEvents.unshift(entry);
+  if (analyticsEvents.length > analyticsMaxEvents) {
+    analyticsEvents.length = analyticsMaxEvents;
+  }
+
+  publishAnalyticsEntry(entry);
+  return entry;
+}
+
+function parseAnalyticsLimit(rawValue) {
+  const parsed = Number(rawValue);
+  if (!Number.isInteger(parsed) || parsed < 1) {
+    return Math.min(150, analyticsMaxEvents);
+  }
+  return Math.min(parsed, analyticsMaxEvents);
+}
+
+function trackAnalyticsResponses(req, res, next) {
+  if (!shouldTrackAnalyticsPath(req.path)) {
+    next();
+    return;
+  }
+
+  const startedAt = Date.now();
+  let capturedJsonBody = null;
+  const originalJson = res.json.bind(res);
+
+  res.json = (body) => {
+    capturedJsonBody = body;
+    return originalJson(body);
+  };
+
+  res.on("finish", () => {
+    const statusCode = Number(res.statusCode) || 0;
+    if (!statusCode) {
+      return;
+    }
+
+    const reason = getAnalyticsReason(statusCode, capturedJsonBody);
+    recordAnalyticsEntry({
+      method: req.method,
+      pathName: req.path || req.originalUrl || "",
+      statusCode,
+      reason,
+      durationMs: Date.now() - startedAt
+    });
+  });
+
+  next();
+}
+
 ensureStore();
 app.use(cors());
 app.use(express.json({ limit: "1mb" }));
 app.use(express.static("."));
+app.use(trackAnalyticsResponses);
 
 app.get("/health", (_req, res) => {
   const store = loadStore();
@@ -538,6 +839,50 @@ app.get("/health", (_req, res) => {
     users: store.users.length,
     keys: store.keys.filter((key) => !key.revokedAt).length
   });
+});
+
+app.get("/v1/analytics", (req, res) => {
+  const limit = parseAnalyticsLimit(req.query?.limit);
+  const events = analyticsEvents.slice(0, limit);
+  return res.json({
+    ok: true,
+    maxEvents: analyticsMaxEvents,
+    summary: summarizeAnalytics(analyticsEvents),
+    events
+  });
+});
+
+app.get("/v1/analytics/stream", (_req, res) => {
+  res.status(200);
+  res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no");
+
+  if (typeof res.flushHeaders === "function") {
+    res.flushHeaders();
+  }
+
+  writeAnalyticsSse(res, "snapshot", {
+    maxEvents: analyticsMaxEvents,
+    summary: summarizeAnalytics(analyticsEvents),
+    events: analyticsEvents.slice(0, Math.min(150, analyticsMaxEvents))
+  });
+
+  analyticsStreamClients.add(res);
+  const heartbeat = setInterval(() => {
+    if (!res.writableEnded) {
+      res.write(": keepalive\n\n");
+    }
+  }, 20000);
+
+  const cleanup = () => {
+    clearInterval(heartbeat);
+    analyticsStreamClients.delete(res);
+  };
+
+  res.on("close", cleanup);
+  res.on("finish", cleanup);
 });
 
 app.post("/auth/puter/signin", async (req, res) => {
@@ -781,6 +1126,99 @@ app.get("/v1/models", handleModelsRequest);
 app.get("/v1/models/:model", handleModelsRequest);
 app.get("/models", handleModelsRequest);
 app.get("/models/:model", handleModelsRequest);
+
+async function handleImageGenerations(req, res) {
+  const owner = requireApiKeyOwner(req, res);
+  if (!owner) {
+    return;
+  }
+
+  const prompt = req.body?.prompt;
+  if (typeof prompt !== "string" || !prompt.trim()) {
+    return res.status(400).json({
+      error: {
+        message: "Missing or invalid `prompt`",
+        type: "invalid_request_error"
+      }
+    });
+  }
+
+  const imageCount = parseImageCount(req.body?.n);
+  if (!imageCount) {
+    return res.status(400).json({
+      error: {
+        message: "`n` must be an integer between 1 and 10",
+        type: "invalid_request_error"
+      }
+    });
+  }
+
+  const responseFormatRaw =
+    typeof req.body?.response_format === "string"
+      ? req.body.response_format.trim().toLowerCase()
+      : "";
+  const responseFormat = responseFormatRaw || "url";
+  if (!["url", "b64_json"].includes(responseFormat)) {
+    return res.status(400).json({
+      error: {
+        message: "`response_format` must be either `url` or `b64_json`",
+        type: "invalid_request_error"
+      }
+    });
+  }
+
+  const size = parseImageSize(req.body?.size);
+  if (!size) {
+    return res.status(400).json({
+      error: {
+        message:
+          "`size` must be `auto` or in `WIDTHxHEIGHT` format (for example `1024x1024`)",
+        type: "invalid_request_error"
+      }
+    });
+  }
+
+  try {
+    const puter = getPuterClient(owner.puterToken);
+    const imageOptions = buildImageOptions(req.body);
+    const created = Math.floor(Date.now() / 1000);
+    const data = [];
+
+    for (let i = 0; i < imageCount; i += 1) {
+      const rawImage = await puter.ai.txt2img(imageOptions);
+      const source = normalizeImageSource(rawImage);
+      if (!source) {
+        throw new Error("Image generation returned empty payload");
+      }
+
+      if (responseFormat === "b64_json") {
+        const b64 = await imageSourceToBase64(source);
+        data.push({ b64_json: b64 });
+      } else {
+        data.push({ url: source });
+      }
+    }
+
+    markKeyAsUsed(owner);
+
+    return res.json({
+      created,
+      data
+    });
+  } catch (error) {
+    const mapped = mapProviderError(error);
+    return res.status(mapped.status).json({
+      error: {
+        message: mapped.message,
+        type: mapped.type,
+        provider_status: mapped.providerStatus
+      }
+    });
+  }
+}
+
+app.post("/v1/images/generations", handleImageGenerations);
+app.post("/images/generations", handleImageGenerations);
 
 async function handleChatCompletions(req, res) {
   const owner = requireApiKeyOwner(req, res);

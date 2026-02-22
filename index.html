@@ -321,9 +321,137 @@
         white-space: pre-wrap;
       }
 
+      .analytics-meta {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: space-between;
+        align-items: center;
+        gap: 10px;
+      }
+
+      .analytics-live {
+        margin: 0;
+        font-size: 0.85rem;
+        color: var(--muted);
+      }
+
+      .analytics-live[data-tone="ok"] {
+        color: #0b6f4a;
+      }
+
+      .analytics-live[data-tone="error"] {
+        color: var(--danger);
+      }
+
+      .analytics-summary {
+        display: grid;
+        gap: 10px;
+        grid-template-columns: repeat(4, minmax(120px, 1fr));
+      }
+
+      .analytics-card {
+        background: rgba(255, 255, 255, 0.78);
+        border: 1px solid rgba(17, 36, 51, 0.18);
+        border-radius: 12px;
+        padding: 10px 12px;
+      }
+
+      .analytics-card-label {
+        margin: 0;
+        font-size: 0.76rem;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        color: var(--muted);
+      }
+
+      .analytics-card-value {
+        margin: 6px 0 0;
+        font-size: 1.4rem;
+        font-weight: 700;
+      }
+
+      .analytics-breakdown {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+
+      .analytics-chip {
+        display: inline-flex;
+        align-items: center;
+        border-radius: 999px;
+        padding: 5px 10px;
+        font-family: var(--mono);
+        font-size: 0.78rem;
+        border: 1px solid rgba(17, 36, 51, 0.2);
+        background: rgba(255, 255, 255, 0.78);
+        color: var(--ink);
+      }
+
+      .analytics-chip.is-success {
+        border-color: rgba(14, 131, 85, 0.35);
+        color: #0b6f4a;
+      }
+
+      .analytics-chip.is-error {
+        border-color: rgba(184, 55, 55, 0.38);
+        color: var(--danger);
+      }
+
+      .analytics-table-wrap {
+        border: 1px solid rgba(17, 36, 51, 0.18);
+        border-radius: 12px;
+        overflow: auto;
+        background: rgba(255, 255, 255, 0.75);
+      }
+
+      .analytics-table {
+        width: 100%;
+        border-collapse: collapse;
+        min-width: 760px;
+        font-family: var(--mono);
+        font-size: 0.78rem;
+      }
+
+      .analytics-table th,
+      .analytics-table td {
+        padding: 8px 10px;
+        text-align: left;
+        border-bottom: 1px solid rgba(17, 36, 51, 0.09);
+        vertical-align: top;
+      }
+
+      .analytics-table th {
+        background: rgba(17, 36, 51, 0.07);
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        font-size: 0.72rem;
+      }
+
+      .status-pill {
+        display: inline-block;
+        border-radius: 999px;
+        padding: 2px 8px;
+        border: 1px solid rgba(17, 36, 51, 0.2);
+      }
+
+      .status-pill.is-success {
+        border-color: rgba(14, 131, 85, 0.35);
+        color: #0b6f4a;
+      }
+
+      .status-pill.is-error {
+        border-color: rgba(184, 55, 55, 0.38);
+        color: var(--danger);
+      }
+
       @media (max-width: 920px) {
         .grid {
           grid-template-columns: 1fr;
+        }
+
+        .analytics-summary {
+          grid-template-columns: repeat(2, minmax(120px, 1fr));
         }
       }
     </style>
@@ -350,6 +478,7 @@
         <button class="tab-btn" data-tab-target="keys" aria-selected="false">Keys</button>
         <button class="tab-btn" data-tab-target="playground" aria-selected="false">Playground</button>
         <button class="tab-btn" data-tab-target="templates" aria-selected="false">Templates</button>
+        <button class="tab-btn" data-tab-target="analytics" aria-selected="false">Analytics</button>
       </nav>
 
       <main class="workspace">
@@ -426,17 +555,88 @@
           <pre id="templateCode">Generating template...</pre>
           <button id="copyTemplateBtn" class="btn-ghost">Copy Template Code</button>
         </section>
+
+        <section class="tab-panel" data-tab-panel="analytics">
+          <div class="panel-head">
+            <h2>Response Analytics</h2>
+            <p>Real-time status tracking for gateway responses, including error reasons.</p>
+          </div>
+
+          <div class="analytics-meta">
+            <p id="analyticsLiveState" class="analytics-live" data-tone="idle">Live stream: connecting...</p>
+            <button id="refreshAnalyticsBtn" class="btn-ghost">Refresh Snapshot</button>
+          </div>
+
+          <div class="analytics-summary">
+            <article class="analytics-card">
+              <p class="analytics-card-label">Total</p>
+              <p class="analytics-card-value" id="analyticsTotal">0</p>
+            </article>
+            <article class="analytics-card">
+              <p class="analytics-card-label">HTTP 200</p>
+              <p class="analytics-card-value" id="analytics200">0</p>
+            </article>
+            <article class="analytics-card">
+              <p class="analytics-card-label">Success</p>
+              <p class="analytics-card-value" id="analyticsSuccess">0</p>
+            </article>
+            <article class="analytics-card">
+              <p class="analytics-card-label">Errors</p>
+              <p class="analytics-card-value" id="analyticsError">0</p>
+            </article>
+          </div>
+
+          <div>
+            <p class="label">Status Breakdown</p>
+            <div id="analyticsStatusBreakdown" class="analytics-breakdown"></div>
+          </div>
+
+          <div class="analytics-table-wrap">
+            <table class="analytics-table">
+              <thead>
+                <tr>
+                  <th>Time</th>
+                  <th>Method</th>
+                  <th>Path</th>
+                  <th>Status</th>
+                  <th>Reason</th>
+                  <th>Duration</th>
+                </tr>
+              </thead>
+              <tbody id="analyticsTableBody"></tbody>
+            </table>
+          </div>
+          <p class="small" id="analyticsEmpty">No tracked responses yet.</p>
+        </section>
       </main>
     </div>
 
     <script>
       const SESSION_STORAGE_KEY = "puter_gateway_session_token";
+      const ANALYTICS_EVENT_LIMIT = 150;
+
+      function createEmptyAnalyticsSummary() {
+        return {
+          total: 0,
+          ok200Count: 0,
+          successCount: 0,
+          errorCount: 0,
+          byStatus: {}
+        };
+      }
+
       const state = {
         sessionToken: localStorage.getItem(SESSION_STORAGE_KEY) || "",
         user: null,
         keys: [],
         newestPlaintextKey: "",
-        activeTab: "auth"
+        activeTab: "auth",
+        analytics: {
+          events: [],
+          summary: createEmptyAnalyticsSummary(),
+          stream: null,
+          reconnectTimer: null
+        }
       };
 
       const dom = {
@@ -461,6 +661,15 @@
         templateType: document.getElementById("templateType"),
         templateCode: document.getElementById("templateCode"),
         copyTemplateBtn: document.getElementById("copyTemplateBtn"),
+        refreshAnalyticsBtn: document.getElementById("refreshAnalyticsBtn"),
+        analyticsLiveState: document.getElementById("analyticsLiveState"),
+        analyticsTotal: document.getElementById("analyticsTotal"),
+        analytics200: document.getElementById("analytics200"),
+        analyticsSuccess: document.getElementById("analyticsSuccess"),
+        analyticsError: document.getElementById("analyticsError"),
+        analyticsStatusBreakdown: document.getElementById("analyticsStatusBreakdown"),
+        analyticsTableBody: document.getElementById("analyticsTableBody"),
+        analyticsEmpty: document.getElementById("analyticsEmpty"),
         tabButtons: Array.from(document.querySelectorAll("[data-tab-target]")),
         tabPanels: Array.from(document.querySelectorAll("[data-tab-panel]"))
       };
@@ -548,6 +757,280 @@
 
         document.querySelectorAll(".revoke-btn").forEach((button) => {
           button.addEventListener("click", () => revokeKey(button.dataset.keyId));
+        });
+      }
+
+      function setAnalyticsLiveState(message, tone = "idle") {
+        dom.analyticsLiveState.textContent = `Live stream: ${message}`;
+        dom.analyticsLiveState.dataset.tone = tone;
+      }
+
+      function normalizeAnalyticsSummary(summary) {
+        const fallback = createEmptyAnalyticsSummary();
+        if (!summary || typeof summary !== "object") {
+          return fallback;
+        }
+
+        const toNonNegativeInt = (value) => {
+          const numeric = Number(value);
+          if (!Number.isFinite(numeric)) {
+            return 0;
+          }
+          return Math.max(0, Math.floor(numeric));
+        };
+
+        const byStatus = {};
+        if (summary.byStatus && typeof summary.byStatus === "object") {
+          for (const [statusCode, count] of Object.entries(summary.byStatus)) {
+            const parsedStatus = Number(statusCode);
+            const parsedCount = toNonNegativeInt(count);
+            if (Number.isInteger(parsedStatus) && parsedStatus > 0 && parsedCount > 0) {
+              byStatus[parsedStatus] = parsedCount;
+            }
+          }
+        }
+
+        return {
+          total: toNonNegativeInt(summary.total),
+          ok200Count: toNonNegativeInt(summary.ok200Count),
+          successCount: toNonNegativeInt(summary.successCount),
+          errorCount: toNonNegativeInt(summary.errorCount),
+          byStatus
+        };
+      }
+
+      function normalizeAnalyticsEvent(entry) {
+        if (!entry || typeof entry !== "object") {
+          return null;
+        }
+
+        const status = Number(entry.status);
+        const durationMs = Number(entry.durationMs);
+        return {
+          id:
+            typeof entry.id === "string" && entry.id
+              ? entry.id
+              : `evt_local_${Date.now()}_${Math.random().toString(16).slice(2)}`,
+          at: typeof entry.at === "string" && entry.at ? entry.at : new Date().toISOString(),
+          method:
+            typeof entry.method === "string" && entry.method
+              ? entry.method.toUpperCase()
+              : "-",
+          path: typeof entry.path === "string" && entry.path ? entry.path : "-",
+          status: Number.isInteger(status) ? status : 0,
+          reason:
+            typeof entry.reason === "string" && entry.reason.trim()
+              ? entry.reason.trim()
+              : "-",
+          durationMs: Number.isFinite(durationMs) ? Math.max(0, Math.round(durationMs)) : null
+        };
+      }
+
+      function normalizeAnalyticsEvents(events) {
+        if (!Array.isArray(events)) {
+          return [];
+        }
+
+        const normalized = [];
+        for (const entry of events) {
+          const safeEntry = normalizeAnalyticsEvent(entry);
+          if (!safeEntry) {
+            continue;
+          }
+          normalized.push(safeEntry);
+        }
+
+        return normalized.slice(0, ANALYTICS_EVENT_LIMIT);
+      }
+
+      function parseSsePayload(rawData) {
+        try {
+          return JSON.parse(rawData);
+        } catch {
+          return null;
+        }
+      }
+
+      function upsertAnalyticsEntry(entry) {
+        const safeEntry = normalizeAnalyticsEvent(entry);
+        if (!safeEntry) {
+          return;
+        }
+
+        state.analytics.events = [
+          safeEntry,
+          ...state.analytics.events.filter((item) => item.id !== safeEntry.id)
+        ].slice(0, ANALYTICS_EVENT_LIMIT);
+      }
+
+      function renderAnalytics() {
+        const summary = normalizeAnalyticsSummary(state.analytics.summary);
+        state.analytics.summary = summary;
+
+        dom.analyticsTotal.textContent = String(summary.total);
+        dom.analytics200.textContent = String(summary.ok200Count);
+        dom.analyticsSuccess.textContent = String(summary.successCount);
+        dom.analyticsError.textContent = String(summary.errorCount);
+
+        dom.analyticsStatusBreakdown.innerHTML = "";
+        const statusEntries = Object.entries(summary.byStatus)
+          .map(([statusCode, count]) => ({
+            statusCode: Number(statusCode),
+            count: Number(count)
+          }))
+          .sort((a, b) => a.statusCode - b.statusCode);
+
+        if (!statusEntries.length) {
+          const chip = document.createElement("span");
+          chip.className = "analytics-chip";
+          chip.textContent = "No responses yet";
+          dom.analyticsStatusBreakdown.appendChild(chip);
+        } else {
+          for (const statusEntry of statusEntries) {
+            const chip = document.createElement("span");
+            chip.className = `analytics-chip ${statusEntry.statusCode >= 400 ? "is-error" : "is-success"}`;
+            chip.textContent = `${statusEntry.statusCode}: ${statusEntry.count}`;
+            dom.analyticsStatusBreakdown.appendChild(chip);
+          }
+        }
+
+        dom.analyticsTableBody.innerHTML = "";
+        const events = normalizeAnalyticsEvents(state.analytics.events);
+        state.analytics.events = events;
+        dom.analyticsEmpty.style.display = events.length ? "none" : "block";
+
+        for (const entry of events) {
+          const row = document.createElement("tr");
+
+          const timeCell = document.createElement("td");
+          timeCell.textContent = formatDate(entry.at);
+          row.appendChild(timeCell);
+
+          const methodCell = document.createElement("td");
+          methodCell.textContent = entry.method;
+          row.appendChild(methodCell);
+
+          const pathCell = document.createElement("td");
+          const pathCode = document.createElement("code");
+          pathCode.textContent = entry.path;
+          pathCell.appendChild(pathCode);
+          row.appendChild(pathCell);
+
+          const statusCell = document.createElement("td");
+          const statusPill = document.createElement("span");
+          statusPill.className = `status-pill ${entry.status >= 400 ? "is-error" : "is-success"}`;
+          statusPill.textContent = entry.status ? String(entry.status) : "-";
+          statusCell.appendChild(statusPill);
+          row.appendChild(statusCell);
+
+          const reasonCell = document.createElement("td");
+          reasonCell.textContent = entry.reason;
+          row.appendChild(reasonCell);
+
+          const durationCell = document.createElement("td");
+          durationCell.textContent =
+            Number.isInteger(entry.durationMs) && entry.durationMs >= 0
+              ? `${entry.durationMs} ms`
+              : "-";
+          row.appendChild(durationCell);
+
+          dom.analyticsTableBody.appendChild(row);
+        }
+      }
+
+      async function loadAnalyticsSnapshot() {
+        const result = await apiFetch(`/v1/analytics?limit=${ANALYTICS_EVENT_LIMIT}`, {
+          method: "GET"
+        });
+
+        state.analytics.summary = normalizeAnalyticsSummary(result?.summary);
+        state.analytics.events = normalizeAnalyticsEvents(result?.events);
+        renderAnalytics();
+      }
+
+      function closeAnalyticsStream() {
+        if (state.analytics.reconnectTimer) {
+          clearTimeout(state.analytics.reconnectTimer);
+          state.analytics.reconnectTimer = null;
+        }
+
+        if (state.analytics.stream) {
+          state.analytics.stream.close();
+          state.analytics.stream = null;
+        }
+      }
+
+      function scheduleAnalyticsReconnect() {
+        if (state.analytics.reconnectTimer) {
+          return;
+        }
+
+        state.analytics.reconnectTimer = setTimeout(() => {
+          state.analytics.reconnectTimer = null;
+          connectAnalyticsStream();
+        }, 2000);
+      }
+
+      function connectAnalyticsStream() {
+        if (state.analytics.stream) {
+          state.analytics.stream.close();
+          state.analytics.stream = null;
+        }
+
+        setAnalyticsLiveState("connecting...", "idle");
+        const stream = new EventSource("/v1/analytics/stream");
+        state.analytics.stream = stream;
+
+        stream.addEventListener("open", () => {
+          if (state.analytics.stream !== stream) {
+            return;
+          }
+          setAnalyticsLiveState("connected", "ok");
+        });
+
+        stream.addEventListener("snapshot", (event) => {
+          if (state.analytics.stream !== stream) {
+            return;
+          }
+
+          const payload = parseSsePayload(event.data);
+          if (!payload) {
+            return;
+          }
+
+          state.analytics.summary = normalizeAnalyticsSummary(payload.summary);
+          state.analytics.events = normalizeAnalyticsEvents(payload.events);
+          renderAnalytics();
+        });
+
+        stream.addEventListener("entry", (event) => {
+          if (state.analytics.stream !== stream) {
+            return;
+          }
+
+          const payload = parseSsePayload(event.data);
+          if (!payload) {
+            return;
+          }
+
+          if (payload.entry) {
+            upsertAnalyticsEntry(payload.entry);
+          }
+          if (payload.summary) {
+            state.analytics.summary = normalizeAnalyticsSummary(payload.summary);
+          }
+          renderAnalytics();
+        });
+
+        stream.addEventListener("error", () => {
+          if (state.analytics.stream !== stream) {
+            return;
+          }
+
+          stream.close();
+          state.analytics.stream = null;
+          setAnalyticsLiveState("disconnected, retrying...", "error");
+          scheduleAnalyticsReconnect();
         });
       }
 
@@ -894,20 +1377,33 @@
       dom.copyNewKeyBtn.addEventListener("click", copyNewestKey);
       dom.sendBtn.addEventListener("click", testApi);
       dom.copyTemplateBtn.addEventListener("click", copyTemplateCode);
+      dom.refreshAnalyticsBtn.addEventListener("click", () => {
+        loadAnalyticsSnapshot()
+          .then(() => setAnalyticsLiveState("snapshot refreshed", "ok"))
+          .catch((error) =>
+            setAnalyticsLiveState(`snapshot failed (${error.message})`, "error")
+          );
+      });
       dom.templateType.addEventListener("change", refreshTemplateCode);
       dom.baseUrl.addEventListener("input", refreshTemplateCode);
       dom.useApiKey.addEventListener("input", refreshTemplateCode);
       dom.model.addEventListener("input", refreshTemplateCode);
       dom.prompt.addEventListener("input", refreshTemplateCode);
+      window.addEventListener("beforeunload", closeAnalyticsStream);
 
       renderAuth();
       renderKeys();
+      renderAnalytics();
       if (navigator.platform && navigator.platform.toLowerCase().includes("win")) {
         dom.templateType.value = "powershell";
       }
       refreshTemplateCode();
       switchTab("auth");
       syncSession();
+      loadAnalyticsSnapshot().catch((error) =>
+        setAnalyticsLiveState(`snapshot failed (${error.message})`, "error")
+      );
+      connectAnalyticsStream();
     </script>
   </body>
 </html>
