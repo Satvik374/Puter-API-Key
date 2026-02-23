@@ -32,6 +32,11 @@ PUTER_AUTH_TOKEN=...
 APP_API_KEYS=sk_static_key
 ```
 
+No-sign-in mode (recommended for local/single-user use):
+- Set `PUTER_AUTH_TOKEN` in `.env`.
+- The dashboard works without signing in.
+- All generated keys use the server token, so they keep working even if you never sign in.
+
 ## 3) Run
 
 ```bash

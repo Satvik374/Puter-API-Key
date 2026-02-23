@@ -21,6 +21,9 @@ const bootstrapApiKeys = new Set(
     .map((value) => value.trim())
     .filter(Boolean)
 );
+const bootstrapEnabled = Boolean(bootstrapPuterToken);
+const BOOTSTRAP_USER_ID = "bootstrap";
+const BOOTSTRAP_USERNAME = "server-token";
 const storePath = path.join(process.cwd(), "data", "api-store.json");
 const sessions = new Map();
 const puterClientsByToken = new Map();
@@ -64,6 +67,44 @@ function loadStore() {
 function saveStore(store) {
   ensureStore();
   fs.writeFileSync(storePath, JSON.stringify(store, null, 2), "utf8");
+}
+
+function ensureBootstrapUser(store) {
+  if (!bootstrapEnabled) {
+    return null;
+  }
+
+  const now = new Date().toISOString();
+  let user = store.users.find((entry) => entry.id === BOOTSTRAP_USER_ID);
+  let changed = false;
+
+  if (!user) {
+    user = {
+      id: BOOTSTRAP_USER_ID,
+      username: BOOTSTRAP_USERNAME,
+      puterToken: bootstrapPuterToken,
+      lastLoginAt: now
+    };
+    store.users.push(user);
+    saveStore(store);
+    return user;
+  }
+
+  if (user.username !== BOOTSTRAP_USERNAME) {
+    user.username = BOOTSTRAP_USERNAME;
+    changed = true;
+  }
+  if (user.puterToken !== bootstrapPuterToken) {
+    user.puterToken = bootstrapPuterToken;
+    changed = true;
+  }
+
+  if (changed) {
+    user.lastLoginAt = now;
+    saveStore(store);
+  }
+
+  return user;
 }
 
 function randomChars(length) {
@@ -122,18 +163,49 @@ function getSession(req) {
   return { sessionToken, ...session };
 }
 
+function getBootstrapSession() {
+  if (!bootstrapEnabled) {
+    return null;
+  }
+
+  const store = loadStore();
+  const user = ensureBootstrapUser(store);
+  if (!user) {
+    return null;
+  }
+
+  return {
+    sessionToken: "",
+    userId: user.id,
+    username: user.username,
+    expiresAt: Date.now() + sessionTtlMs,
+    source: "bootstrap"
+  };
+}
+
 function requireSession(req, res, next) {
   const session = getSession(req);
+  if (session) {
+    req.session = { ...session, source: "session" };
+    return next();
+  }
+
+  const bootstrapSession = getBootstrapSession();
+  if (bootstrapSession) {
+    req.session = bootstrapSession;
+    return next();
+  }
+
   if (!session) {
     return res.status(401).json({
       error: {
-        message: "Sign in with Puter first",
+        message: bootstrapEnabled
+          ? "Sign in with Puter or configure PUTER_AUTH_TOKEN"
+          : "Sign in with Puter first",
         type: "unauthorized"
       }
     });
   }
-  req.session = session;
-  return next();
 }
 
 async function verifyPuterToken(puterToken) {
@@ -181,6 +253,15 @@ function findOwnerByApiKey(rawApiKey) {
     return null;
   }
 
+  if (bootstrapEnabled) {
+    return {
+      source: "bootstrap",
+      puterToken: bootstrapPuterToken,
+      keyRecord,
+      ownerId: keyRecord.userId
+    };
+  }
+
   const owner = store.users.find((user) => user.id === keyRecord.userId);
   if (!owner?.puterToken) {
     return null;
@@ -221,7 +302,7 @@ function requireApiKeyOwner(req, res) {
 }
 
 function markKeyAsUsed(owner) {
-  if (owner?.source !== "user" || !owner?.keyRecord?.id) {
+  if (!owner?.keyRecord?.id) {
     return;
   }
 
@@ -826,6 +907,10 @@ function trackAnalyticsResponses(req, res, next) {
 }
 
 ensureStore();
+if (bootstrapEnabled) {
+  const store = loadStore();
+  ensureBootstrapUser(store);
+}
 app.use(cors());
 app.use(express.json({ limit: "1mb" }));
 app.use(express.static("."));
@@ -946,6 +1031,7 @@ app.post("/auth/puter/signin", async (req, res) => {
 
 app.get("/auth/me", requireSession, (req, res) => {
   const store = loadStore();
+  const isBootstrap = req.session?.source === "bootstrap";
   const user = store.users.find((entry) => entry.id === req.session.userId);
   if (!user) {
     return res.status(401).json({
@@ -956,12 +1042,20 @@ app.get("/auth/me", requireSession, (req, res) => {
     });
   }
 
-  const keyCount = store.keys.filter(
-    (entry) => entry.userId === user.id && !entry.revokedAt
-  ).length;
+  const keyCount = store.keys.filter((entry) => {
+    if (entry.revokedAt) {
+      return false;
+    }
+    if (isBootstrap) {
+      return true;
+    }
+    return entry.userId === user.id;
+  }).length;
 
   return res.json({
     ok: true,
+    mode: isBootstrap ? "bootstrap" : "session",
+    requiresSignIn: !bootstrapEnabled,
     user: {
       id: user.id,
       username: user.username
@@ -971,14 +1065,25 @@ app.get("/auth/me", requireSession, (req, res) => {
 });
 
 app.post("/auth/signout", requireSession, (req, res) => {
-  sessions.delete(req.session.sessionToken);
+  if (req.session?.sessionToken) {
+    sessions.delete(req.session.sessionToken);
+  }
   return res.json({ ok: true });
 });
 
 app.get("/v1/keys", requireSession, (req, res) => {
   const store = loadStore();
+  const isBootstrap = req.session?.source === "bootstrap";
   const keys = store.keys
-    .filter((entry) => entry.userId === req.session.userId && !entry.revokedAt)
+    .filter((entry) => {
+      if (entry.revokedAt) {
+        return false;
+      }
+      if (isBootstrap) {
+        return true;
+      }
+      return entry.userId === req.session.userId;
+    })
     .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
     .map((entry) => ({
       id: entry.id,
@@ -1026,10 +1131,11 @@ app.post("/v1/keys", requireSession, (req, res) => {
 
 app.get("/v1/keys/:id/reveal", requireSession, (req, res) => {
   const store = loadStore();
+  const isBootstrap = req.session?.source === "bootstrap";
   const keyRecord = store.keys.find(
     (entry) =>
       entry.id === req.params.id &&
-      entry.userId === req.session.userId &&
+      (isBootstrap || entry.userId === req.session.userId) &&
       !entry.revokedAt
   );
 
@@ -1063,8 +1169,11 @@ app.get("/v1/keys/:id/reveal", requireSession, (req, res) => {
 
 app.delete("/v1/keys/:id", requireSession, (req, res) => {
   const store = loadStore();
+  const isBootstrap = req.session?.source === "bootstrap";
   const keyRecord = store.keys.find(
-    (entry) => entry.id === req.params.id && entry.userId === req.session.userId
+    (entry) =>
+      entry.id === req.params.id &&
+      (isBootstrap || entry.userId === req.session.userId)
   );
 
   if (!keyRecord || keyRecord.revokedAt) {

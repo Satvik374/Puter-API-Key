@@ -471,7 +471,9 @@
         </div>
       </header>
 
-      <p class="status-banner" id="authStatus">Sign in with Puter to unlock all key management features.</p>
+      <p class="status-banner" id="authStatus">
+        Sign in with Puter, or configure PUTER_AUTH_TOKEN to use keys without sign-in.
+      </p>
 
       <nav class="tab-nav" role="tablist" aria-label="API Studio Tabs">
         <button class="tab-btn is-active" data-tab-target="auth" aria-selected="true">Auth</button>
@@ -628,6 +630,8 @@
       const state = {
         sessionToken: localStorage.getItem(SESSION_STORAGE_KEY) || "",
         user: null,
+        authMode: "unknown",
+        requiresSignIn: true,
         keys: [],
         newestPlaintextKey: "",
         activeTab: "auth",
@@ -700,6 +704,10 @@
         }
       }
 
+      function canManageKeys() {
+        return Boolean(state.sessionToken) || state.authMode === "bootstrap";
+      }
+
       function formatDate(value) {
         if (!value) return "Never";
         const date = new Date(value);
@@ -708,13 +716,30 @@
       }
 
       function renderAuth() {
+        const isBootstrap = state.authMode === "bootstrap";
         if (state.user) {
+          if (isBootstrap) {
+            dom.sessionPill.textContent = "Server token mode";
+            dom.userLine.textContent = `User ID: ${state.user.id}`;
+            dom.signInBtn.textContent = "Sign In With Puter (optional)";
+            dom.signInBtn.disabled = false;
+            dom.signOutBtn.disabled = true;
+            return;
+          }
+
           dom.sessionPill.textContent = `Signed in: ${state.user.username}`;
           dom.userLine.textContent = `User ID: ${state.user.id}`;
+          dom.signInBtn.textContent = "Sign In With Puter";
+          dom.signInBtn.disabled = false;
+          dom.signOutBtn.disabled = false;
           return;
         }
+
         dom.sessionPill.textContent = "Not signed in";
         dom.userLine.textContent = "";
+        dom.signInBtn.textContent = "Sign In With Puter";
+        dom.signInBtn.disabled = false;
+        dom.signOutBtn.disabled = true;
       }
 
       function renderKeyCount() {
@@ -725,6 +750,16 @@
       function renderKeys() {
         dom.keyList.innerHTML = "";
         renderKeyCount();
+        if (!canManageKeys()) {
+          const li = document.createElement("li");
+          li.className = "key-item";
+          li.textContent = state.requiresSignIn
+            ? "Sign in to manage keys."
+            : "Configure PUTER_AUTH_TOKEN on the server to manage keys.";
+          dom.keyList.appendChild(li);
+          return;
+        }
+
         if (!state.keys.length) {
           const li = document.createElement("li");
           li.className = "key-item";
@@ -1147,27 +1182,30 @@
       }
 
       async function syncSession() {
-        if (!state.sessionToken) {
-          state.user = null;
-          state.keys = [];
-          renderAuth();
-          renderKeys();
-          return;
-        }
-
         try {
           const me = await apiFetch("/auth/me", { method: "GET" });
-          state.user = me.user;
+          state.user = me.user || null;
+          state.authMode = me.mode || (state.sessionToken ? "session" : "bootstrap");
+          state.requiresSignIn = Boolean(me.requiresSignIn);
           renderAuth();
           await loadKeys();
-          setStatus("Signed in and ready to create/use keys.");
+
+          if (state.authMode === "bootstrap") {
+            setStatus("Server token mode enabled. Sign-in not required.");
+          } else {
+            setStatus("Signed in and ready to create/use keys.");
+          }
         } catch (error) {
-          setSessionToken("");
+          if (state.sessionToken) {
+            setSessionToken("");
+          }
           state.user = null;
+          state.authMode = "none";
+          state.requiresSignIn = true;
           state.keys = [];
           renderAuth();
           renderKeys();
-          setStatus(error.message);
+          setStatus(error.message || "Sign in required.");
         }
       }
 
@@ -1195,6 +1233,7 @@
 
           setSessionToken(data.sessionToken);
           state.user = data.user;
+          state.authMode = "session";
           setStatus(`Signed in as ${data.user.username}.`);
           renderAuth();
           await loadKeys();
@@ -1223,6 +1262,8 @@
 
         setSessionToken("");
         state.user = null;
+        state.authMode = "none";
+        state.requiresSignIn = true;
         state.keys = [];
         state.newestPlaintextKey = "";
         dom.newKeyBox.style.display = "none";
@@ -1234,7 +1275,7 @@
       }
 
       async function loadKeys() {
-        if (!state.sessionToken) {
+        if (!canManageKeys()) {
           state.keys = [];
           renderKeys();
           return;
@@ -1247,8 +1288,12 @@
 
       async function createKey() {
         try {
-          if (!state.sessionToken) {
-            throw new Error("Sign in first.");
+          if (!canManageKeys()) {
+            throw new Error(
+              state.requiresSignIn
+                ? "Sign in first."
+                : "Configure PUTER_AUTH_TOKEN on the server first."
+            );
           }
 
           const name = dom.keyName.value.trim();
